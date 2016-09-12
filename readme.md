@@ -1,0 +1,2 @@
+# Contents
+This repository constains implementation of convex optimization algorithms that I will be studying at seminar [MAP7436](http://people.clas.ufl.edu/yun/map7436c213-seminar-in-applied-mathematics/) at University of Florida.
