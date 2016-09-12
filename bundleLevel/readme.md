@@ -5,7 +5,7 @@ This is a [torch](http://torch.ch/)-based implementation of the fastAPL algorith
 * I have only implemented the fastAPL method, and I will try to finish the other bundle type method, fast USL, recently.
 * Current version only has tests for solving qurdratic programming problems.
 Here is the function value tracking during iteration schemes
-![alt text](fValueTrack.png)
+![alt text](https://github.com/shuhangchen/MAP7436/blob/master/bundleLevel/fValueTrack.png)
 * This version of implementation is highly unstable, completely unoptimized. I will try to fix these problems very recently.
 
 
