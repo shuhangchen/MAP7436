@@ -11,8 +11,7 @@ Fast uniform smoothing level(USL) extends the fast APL to solve one specific typ
 
 <div align="center">
 <figure>
-<img src="recBrain.png" align="middle" width="300" />
-<figcaption> Reconstructed Brain image.</figcaption> 
+<img src="recBrain.png" align="middle" width="300" /> 
 </figure>
 </div>
 
@@ -20,7 +19,6 @@ Fast uniform smoothing level(USL) extends the fast APL to solve one specific typ
 <div align="center">
 <figure>
 <img src="fapl.png" align="middle" width="350">
-<figcaption> Objective function vaule during iteration.</figcaption>
 </figure>
 </div>
 
