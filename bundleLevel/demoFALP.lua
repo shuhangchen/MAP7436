@@ -6,8 +6,8 @@
 require 'torch'
 require 'fastAPL'
 require 'gnuplot'
-sizeM = 20
-sizeN = 20
+local sizeM = 2000
+local sizeN = 4000
 
 local A = torch.randn(sizeM, sizeN);
 local x = torch.randn(sizeN)
@@ -28,28 +28,28 @@ local ballCons = {
 
 local opts = {
    ballConstraint = ballCons,
-   beta = 0.2,
-   theta = 0.2,
-   initialLowerBound = -1e-10,
+   beta = 0.9,
+   theta = 0.9,
+   initialLowerBound = 1e-10,
    initialGap = 1e-3,
-   maxUnconsIter = 10,
+   maxUnconsIter = 100,
    maxIterPerFAPL = 150,
    maxIterPerFAPLgap = 500,
    maxBundles = 5,
    maxPhases = 200,
    expanding = true,
-   eps = 1e-10,
+   eps = 1e-6,
 }
 
 local fValueTrack = {
    init = true,
    fTrack = torch.Tensor(1)
 }
-
+local startTime = os.clock()
 local xSolution = fastAPL.optimConstrained(feval, opts, fValueTrack)
+local computeTime = os.clock() - startTime
 local funValue = feval(xSolution)
 local trueFvalue = feval(x)
 print(funValue)
-print(trueFvalue)
-print(torch.pow(torch.norm(xSolution - x), 2))
+print('time used is '..tostring(computeTime))
 gnuplot.plot(fValueTrack.fTrack)

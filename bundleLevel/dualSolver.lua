@@ -1,48 +1,64 @@
-local thread = require 'threads'
+local thread 
 require 'torch' 
+require 'permuteMatrix'
 
 dualSolver = {}
 
-dualSolver.numThreads = 8
+dualSolver.numThreads = 1
+dualSolver.useThreads = false
+if dualSolver.useThreads then
+   thread = require 'threads'
+end
 
-local function permuteIndex(lengthDualVar)
-   -- 1 stands for that dual variable is not zero, 0 is the dual of the dual is not zero
-   if (lengthDualVar == 1) then
-      return {{1},{0}}
-   else
-      local index = {}
-      local indexOfLast = permuteIndex(lengthDualVar - 1)
-      for i,v in ipairs(indexOfLast) do
-	 local subindex1 = {}
-	 local subindex0 = {}
-	 for j,q in ipairs(v) do
-	    table.insert(subindex1, q)
-	    table.insert(subindex0, q)
+
+local function solveWithNoThreads(bigM, c, permuteMatrix)
+   assert(bigM:size(1) * 2 == bigM:size(2), 'Wrong shape of the big M')
+   local size = bigM:size(1)
+   local lambdaAndMu = torch.Tensor(bigM:size(2)):zero()
+   local solutionErr = 1
+   local njobs = torch.pow(2, bigM:size(1))
+   for i=1, njobs do
+      local resMatrix = torch.Tensor(size, size)
+      local resVec = torch.Tensor(size)
+      resMatrix = bigM:maskedSelect(permuteMatrix[i]:eq(1):view(1, 2 * size):expand(size, 2*size)):view(size, size)
+      local tempSolution, tempSolutionErr
+      local isFullSolution = false
+      -- define the function
+      -- smallM*smallLambdaMu = c
+      local solveLinearEquation= function() tempSolution = torch.gesv(c:view(-1, 1), resMatrix) return tempSolution end
+      local solveLinearEquationByLS = function() tempSolution = torch.gels(c:view(-1, 1), resMatrix) return tempSolution end
+      if pcall(solveLinearEquation) then
+	 -- this equation has a solution because 
+	 if tempSolution:min() >= 0 then
+	    tempSolutionErr = torch.dist(resMatrix * tempSolution, c)
+	    -- it is legitimate solution, we need to check the distance between MX, b
+	    if tempSolutionErr < 1e-10 then
+	       -- we have find a solution, time to abort this task and end all other threads
+	       lambdaAndMu:zero()
+	       lambdaAndMu:maskedCopy(permuteMatrix[i]:eq(1), tempSolution)
+	       solutionErr = tempSolutionErr
+	       return lambdaAndMu, solutionErr
+	    elseif tempSolutionErr < solutionErr then
+	       lambdaAndMu:zero()
+	       lambdaAndMu:maskedCopy(permuteMatrix[i]:eq(1), tempSolution)
+	       solutionErr = tempSolutionErr
+	    end
 	 end
-	 table.insert(subindex1, 1)
-	 table.insert(subindex0, 0)
-	 index[i] = subindex0
-	 index[i + #indexOfLast] = subindex1
+      elseif pcall(solveLinearEquationByLS) then
+	 if tempSolution:min() >= 0 then
+	    tempSolutionErr = torch.dist(resMatrix * tempSolution, c)
+	    if tempSolutionErr < solutionErr then
+	       lambdaAndMu:zero()
+	       lambdaAndMu:maskedCopy(permuteMatrix[i]:eq(1), tempSolution)
+	       solutionErr = tempSolutionErr
+	   end
+	 end
       end
-      return index
    end
+   return lambdaAndMu, solutionErr
 end
 
-local function generateIndexMatrix(lengthDualVar)
-   local index = permuteIndex(lengthDualVar)
-   local matrixOfpermutation = torch.Tensor(torch.pow(2, lengthDualVar), 2 * lengthDualVar)
-   assert(#index == matrixOfpermutation:size(1), " the generation of column table index is wrong")
-   -- print(columnIndexTable)
-   for i,v in ipairs(index) do
-      local vector = torch.Tensor(v)
-      vector = torch.cat(vector, 1 - vector)
-      -- print(vector)
-      matrixOfpermutation[i] = vector:clone()
-   end
-   return matrixOfpermutation
-end
-
-function dualSolver.solve(bigM, c)
+local function solveWithThreads(bigM, c, permuteMatrix)
    --- it returns two variables
    -- the first one is boolean, indicates whether it has found the legitimate solution or not
    -- the second variable is the lambdaAndMu tensor, it is all zero if first returned value is false
@@ -51,7 +67,6 @@ function dualSolver.solve(bigM, c)
    local lambdaAndMu = torch.Tensor(bigM:size(2)):zero()
    local nthread = dualSolver.numThreads
    local njobs = torch.pow(2, bigM:size(1))
-   local permuteMatrix = generateIndexMatrix(bigM:size(1))
    -- print(permuteMatrix:size())
    local solutionPool = thread.Threads(
       nthread,
@@ -72,7 +87,7 @@ function dualSolver.solve(bigM, c)
 	       local solveLinearEquation= function() tempSolution = torch.gesv(c:view(-1, 1), resMatrix) return tempSolution end
 	       if pcall(solveLinearEquation) then
 		  -- this equation has a solution because 
-		  tempSolution = torch.gesv(c:view(-1,1), resMatrix)
+		  -- tempSolution = torch.gesv(c:view(-1,1), resMatrix)
 		  isFullSolution = true
 	       else
 		  -- -- the linear equation smallM*smallLambdaMu = c does not have a solution, smallM is singular
@@ -91,7 +106,7 @@ function dualSolver.solve(bigM, c)
 	       end
 	       if tempSolution:min() >= 0 then
 		  -- it is legitimate solution, we need to check the distance between MX, b
-		  if torch.dist(resMatrix * tempSolution, c) < 1e-12 then
+		  if torch.dist(resMatrix * tempSolution, c) < 1e-6 then
 		     -- we have find a solution, time to abort this task and end all other threads
 		     if isFullSolution then
 			return tempSolution,true
@@ -121,3 +136,14 @@ function dualSolver.solve(bigM, c)
    
    return solutionFound, lambdaAndMu
 end
+
+
+function dualSolver.solve(bigM, c, permuteMatrix)
+   if dualSolver.useThreads then
+      return solveWithThreads(bigM, c, permuteMatrix)
+   else
+      return solveWithNoThreads(bigM, c, permuteMatrix)
+   end
+end
+
+
