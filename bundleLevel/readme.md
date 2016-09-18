@@ -3,7 +3,7 @@ This is a [torch](http://torch.ch/)-based implementation of two types of bundle 
 
 ## Fast APL
 Fast accelerated prox-level(APL) is an variant of APL developed by Wei Zhang. Its core functionalities, including iteration scheme, gap reduction, and prox-centering are contained in [fastAPL.lua](fastAPL.lua?raw=true). The demo code shows an example of fast APL on solving quadratic programming problem. The objective function value during iteration is as follows
-<img src="fapl.pdf" align="middle" width="350">
+<img src="fapl.png" align="middle" width="350">
 
 
 ## Fast USL
@@ -15,7 +15,7 @@ Fast uniform smoothing level(USL) extends the fast APL to solve one specific typ
 </figure>
 </figure>
 <figure>
-<img src="fapl.pdf" align="middle" width="350">
+<img src="fapl.png" align="middle" width="350">
 <figcaption> Objective function vaule during iteration.</figcaption>
 </figure>
 </figure>
