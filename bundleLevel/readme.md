@@ -17,12 +17,12 @@ Fast uniform smoothing level(USL) extends the fast APL to solve one specific typ
 </div>
 
 
-<p align="center">
+<div align="center">
 <figure>
 <img src="fapl.png" align="middle" width="350">
 <figcaption> Objective function vaule during iteration.</figcaption>
 </figure>
-</p>
+</div>
 
 ### dualSolver.lua
 Both two methods spend their compuation time on the subproblem of center projection, which is solved by its dual form. The dual problem is them formulated into an linear equation and solved by brute force enumeration  (in [permuteMatrix.lua](permuteMatrix.lua?raw=true)), which is not so scary as it may sound since the number of dual variables are quite small, 5, for instance. The [dualSolver.lua](dualSolver.lua?raw=true) provides the implementation for solving the linear equation during dual optimization.
