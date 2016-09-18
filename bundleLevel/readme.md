@@ -10,13 +10,18 @@ Fast accelerated prox-level(APL) is an variant of APL developed by Wei Zhang. It
 Fast uniform smoothing level(USL) extends the fast APL to solve one specific type of structured non-smooth problem. It almost has the same iteration scheme except the extra estimation of smoothing parameters. The demo codes show an expamle of brain image reconstruction with TV regularization.
 
 <div align="center">
+<figure>
 <img src="recBrain.png" align="middle" width="300" />
 <figcaption> Reconstructed Brain image.</figcaption> 
+</figure>
 </div>
 
+
 <p align="center">
+<figure>
 <img src="fapl.png" align="middle" width="350">
 <figcaption> Objective function vaule during iteration.</figcaption>
+</figure>
 </p>
 
 ### dualSolver.lua
