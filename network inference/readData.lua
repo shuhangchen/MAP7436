@@ -77,6 +77,12 @@ local function readCascades(cascadesName, numNodes)
 end
 
 
-function readData.read(netFile, cascadeFile, numNodes)
-   return readNetwork(netFile, numNodes), readCascades(cascadeFile, numNodes)
+function readData.read(netFile, cascadeFile, numNodes, fileType)
+   if fileType == 'txt' then
+      return readNetwork(netFile, numNodes), readCascades(cascadeFile, numNodes)
+   elseif fileType == 't7' then
+      return torch.load(netFile), torch.load(cascadeFile)
+   else
+      error('No such file type specified')
+   end
 end
