@@ -16,10 +16,10 @@ Data description:
   - Nan means I have not gotten the results yet.
 
 
-**Table:** _Each column means the recovery accuracy of one type of network under different amount of cascades. The first number in the tuple (a,b) is mean absolute difference $a = \sum_{i,j}|\alpha_{ij} - \hat \alpha_{ij}|$, the second element is relative absolute difference $b = \frac{\sum_{i,j}|\alpha_{ij} - \hat \alpha_{ij}|}{\alpha_{ij}}$._
+**Table:** Each column means the recovery accuracy of one type of network under different amount of cascades. The first number in the tuple (a,b) is mean absolute difference \(a = \sum_{i,j}|\alpha_{ij} - \hat \alpha_{ij}|\), the second element is relative absolute difference \(b = \frac{\sum_{i,j}|\alpha_{ij} - \hat \alpha_{ij}|}{\alpha_{ij}}\).
 
 Network Cascades | Renyi_1 | Kronecker | Renyi_1-5
 --- | --- | --- |---
-1000 |(0.4, 1.91) | (0.087, 0.756) | (0.36 , 1.99)
+1000 |(0.4, 1.91) | (0.087, 0.756) | Nan
 5000 | (0.36, 1.99) | (0.038,0.331)| Nan
 10000 | Nan | (0.026, 0.24) | Nan
