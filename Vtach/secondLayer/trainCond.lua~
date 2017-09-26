@@ -1,0 +1,49 @@
+require 'torch'
+require 'nn'
+require 'xlua'
+require 'optim'
+require 'gnuplot'
+require 'cunn'
+require 'condFactor'
+-- fix the seed
+
+trainCond = {}
+
+function trainCond.train(opts,j,k,nt,nc)
+-- train the conditional autoencoder with trainVT=true and trueVT = false
+
+
+
+   local opt = _.clone(opts)
+   
+   local hp = {}
+
+   hp.batchSize =  opt.batchSize
+   hp.learningRate =  opt.LR
+   hp.optimMethod = opt.optimMethod
+   hp.hingeCoef = opt.hingeCoef
+   -- only one type of noise can be used
+   hp.maskCorruptionVar = opt.maskCorruptionVar
+   hp.GaussianCorruptionVar = opt.GaussianCorruptionVar
+   hp.momentum = opt.momentum
+   hp.weightDecay = opt.weightDecay
+   hp.sampleEachEpoch = opt.sampleEachEpoch
+   hp.maxNumEpoch = opt.maxNumEpoch
+   hp.maxIter = opt.maxIter
+   hp.RMSalpha = opt.RMSalpha
+   hp.coefL1 = opt.coefL1
+   hp.coefL2 = opt.coefL2
+   hp.cuda = opt.cuda
+
+   -- train VT factors first
+   hp.numHiddenUnits = opt.numHiddenUnits_VT
+   hp.marginMain = opt.marginVT
+   hp.trainVT = true
+   condFactorVT.train(hp,j,k,nt,nc)
+   --train PA factors
+   hp.numHiddenUnits = opt.numHiddenUnits_PA
+   hp.trainVT = false
+   condFactorPA.train(hp,j,k,nc)
+   
+
+end

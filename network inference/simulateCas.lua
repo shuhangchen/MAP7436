@@ -92,9 +92,13 @@ end
 -- local numCascades = 1
 -- local cascadeName = 'simulation_data/cascade_renyi_1_'..tostring(numCascades)..'.t7'
 
-local adjName = 'simulation_data/adj_renyi_2_1024.t7'
-local numCascades = 1000
-local cascadeName = 'simulation_data/cascade_renyi_2_'..tostring(numCascades)..'.t7'
+-- read the mat data
+local name = 'simuGraph/adj_1.5_64.mat'
+local adjName = 'simulation_data/adj_1.5_64.t7'
+local mat = matio.load(name)
+torch.save(adjName, mat.adj)
+local numCascades = 200
+local cascadeName = 'simulation_data/cascade_ry_1.5_'..tostring(numCascades)..'.t7'
 local horizon = 10
 
 simulate(adjName, cascadeName, horizon, numCascades)

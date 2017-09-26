@@ -1,0 +1,47 @@
+-- flow the net with input from first layer (MES) to generate input for current data
+
+require 'torch'
+require 'nn'
+require 'xlua'
+require 'optim'
+require 'gnuplot'
+require 'cunn'
+-- fix the seed
+
+
+hyperExperName = '/home/mark/Documents/VT_learning/squarePA/firstLayer/candidates'
+
+-- load the data and trained model
+factor = torch.load(hyperExperName.."/factor.net")
+
+qrsData = torch.load('/home/mark/Documents/VT_learning/data/uniformSample/qrsData1012_test_sr3.t7')
+-- transform the input data into cuda
+qrsData.train_x = qrsData.train_x:cuda()
+qrsData.train_y = qrsData.train_y:cuda()
+qrsData.val_x = qrsData.val_x:cuda()
+qrsData.val_y = qrsData.val_y:cuda()
+qrsData.test_x = qrsData.test_x:cuda()
+qrsData.test_y = qrsData.test_y:cuda()
+qrsData.train_coord =qrsData.train_coord:cuda()
+qrsData.val_coord = qrsData.val_coord:cuda()
+qrsData.test_coord = qrsData.test_coord:cuda()
+
+flowNet = factor:get(1):get(1):get(1)
+flowNet_val = flowNet:clone('weight','bias')
+flowNet_test = flowNet:clone('weight','bias')
+--print('The structure of flow Net:\n'..flowNet:__tostring())
+
+--propagate data, training data and validation dataset
+qrsLayer2 = {
+   train_x = flowNet:forward(qrsData.train_x),
+   val_x = flowNet_val:forward(qrsData.val_x),
+   test_x = flowNet_test:forward(qrsData.test_x),
+   train_y = qrsData.train_y,
+   val_y = qrsData.val_y,
+   test_y = qrsData.test_y,
+   train_coord = qrsData.train_coord,
+   val_coord = qrsData.val_coord,
+   test_coord = qrsData.test_coord
+}
+
+torch.save('/home/mark/Documents/VT_learning/squarePA/firstLayer/candidates/qrsLayer1.t7',qrsLayer2)

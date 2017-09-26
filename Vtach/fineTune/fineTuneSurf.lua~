@@ -1,0 +1,327 @@
+-- this file loads the pre-trained denoising auto-encoder and fine tuning the whole network
+-- shuhang
+
+require 'torch'
+require 'nn'
+require 'xlua'
+require 'optim'
+require 'gnuplot'
+require 'cunn'
+require 'SurfaceCriterion_kdtree'
+-- fix the seed
+
+-- opt = {
+--    MaxNumEpoches = 400, ----700
+--    optimization = 'SGD', -- 'LBFGS',
+--    learningRate = 5e-3,    -- 5E-3 FOR sgd
+--    momentum = 0.5,   -- 0.95
+--    RMSalpha = 0.9,   -- RMSprop only
+--    maxIter = 5,
+--    weightDecay = 0.0001,
+--    coefL1 = 0.01,                   -- L1 and L2 penalty coefficient for weight matrix
+--    coefL2 = 0,
+--    dropout = true,
+--    batchNormalization=false,
+--    trainVT= false,
+--    numThreads = 1
+-- }
+
+fineTuneSurf = {}
+
+function fineTuneSurf.run(opt, j, k)
+   hexperName = '/home/mark/Documents/VT_learning/Logs/fineTuneSurf/MES_j'..tostring(j)..'k'..tostring(k)
+--   hexperName = '/media/usb/log/MES/MES_'..'j'..tostring(j)..'k'..tostring(k)..'nt'..tostring(nt)..'nc'..tostring(nc)
+   os.execute('mkdir -p '.. hexperName)
+   torch.save(hexperName..'/hypers.t7',opt)
+   hyperPath = '/home/mark/Documents/VT_learning/squarePA/'
+
+   Factor1L = torch.load(hyperPath.."firstLayer/candidates/factor.net")
+   cond2L_VT = torch.load(hyperPath.."secondLayer/candidates/cond_VT.net")
+   cond2L_PA = torch.load(hyperPath.."secondLayer/candidates/cond_PA.net")
+   cond3L_VT = torch.load(hyperPath.."thirdLayer/candidates/cond.net")
+   --DAE3L = torch.load(hyperPath.."thirdVTsDAE/candidates/VTsDAE3L.net")
+
+   network = nn.Sequential()
+   if opt.dropout then
+      network:add(nn.Dropout(0.2))
+   end
+   -- concatenate all trained network into the whole
+   network:add(Factor1L:get(1):get(1):get(1))
+   network:add(nn.JoinTable(2))
+   if opt.dropout then
+      network:add(nn.Dropout(0.5))
+   end
+   if opt.trainVT then
+      network:add(cond2L_VT:get(1):get(1):get(1):get(2))
+      network:add(cond2L_VT:get(1):get(1):get(1):get(3))
+   else
+      VTweight = nn.Sequential()
+      VTweight:add(cond2L_VT:get(1):get(1):get(1):get(2)):add(cond2L_VT:get(1):get(1):get(1):get(3))
+      PAweight = nn.Sequential()
+      PAweight:add(cond2L_PA:get(1):get(1):get(1):get(2)):add(cond2L_PA:get(1):get(1):get(1):get(3))
+      joinNet = nn.ConcatTable():add(VTweight):add(PAweight)
+      network:add(joinNet)
+      network:add(nn.JoinTable(2))
+   end
+   if opt.dropout then
+      network:add(nn.Dropout(0.5))
+   end
+   network:add(cond3L_VT:get(1):get(1):get(1):get(2))
+   network:add(cond3L_VT:get(1):get(1):get(1):get(3))
+   if opt.dropout then
+      network:add(nn.Dropout(0.5))
+   end
+
+   -- the following is for two layer
+   -- if opt.trainVT then
+   --    numHiddenUnitsLastLayer  = cond2L_VT:get(1):get(1):get(1):get(2).weight:size(1) 
+   -- else
+   --    numHiddenUnitsLastLayer =  cond2L_VT:get(1):get(1):get(1):get(2).weight:size(1) +  cond2L_PA:get(1):get(1):get(1):get(2).weight:size(1)
+   -- end
+
+   numHiddenUnitsLastLayer = cond3L_VT:get(1):get(1):get(1):get(2).weight:size(1)
+   numCoordDim = 3
+   network:add(nn.Linear(numHiddenUnitsLastLayer,numCoordDim))
+   network:cuda()
+--   print('The whole network architecture is '..tostring(network))
+
+   -- load the data and trained model
+   qrsData = torch.load('/home/mark/Documents/VT_learning/data/qrsData.t7')
+
+   -- transform the input data into cuda formate
+   qrsData.train_x = qrsData.train_x:cuda()
+   qrsData.train_y = qrsData.train_y:cuda()
+   qrsData.train_coord = qrsData.train_coord:cuda()
+   qrsData.val_x = qrsData.val_x:cuda()
+   qrsData.val_y = qrsData.val_y:cuda()
+   qrsData.val_coord = qrsData.val_coord:cuda()
+   qrsData.test_x = qrsData.test_x:cuda()
+   qrsData.test_y = qrsData.test_y:cuda()
+   qrsData.test_coord = qrsData.test_coord:cuda()
+
+
+   parameters,gradParameters = network:getParameters()
+   
+   if opt.surfaceCri then 
+      -- load the mesh data and construct the neighboring system
+      meshData = torch.load('/home/mark/Documents/VT_learning/data/meshCentroids.t7')
+      criterion = nn.SurfaceCriterion_kdtree('/home/mark/Documents/VT_learning/data/meshTree.ann', meshData.mesh_normal, opt.surfParam)
+   else
+      criterion = nn.MSECriterion()
+   end
+   criterion:cuda()
+
+   network_val = network:clone('weight','bias')
+   network_test = network:clone('weight','bias')
+   local MSERloss = function(outputs, y)
+      MSERstat = torch.sqrt(torch.sum(torch.pow(outputs-y,2),2))
+      MSERxyz={
+	 x= torch.abs(outputs[{{},{1}}]-y[{{},{1}}]):mean(),
+	 y= torch.abs(outputs[{{},{2}}]-y[{{},{2}}]):mean(),
+	 z= torch.abs(outputs[{{},{3}}]-y[{{},{3}}]):mean()
+      }
+      MSERmean = MSERstat:mean()
+      MSERstd = MSERstat:std()
+      CI95 = 1.96*MSERstd/torch.sqrt(outputs:size(1))
+      return MSERmean,MSERstd,CI95,MSERxyz
+   end
+
+   epoch = 0
+
+
+   while epoch < opt.MaxNumEpoches do
+      
+      xlua.progress(epoch, opt.MaxNumEpoches)
+
+      epoch = epoch + 1
+      local time = sys.clock()
+      -- start training
+      if opt.dropout then
+	 network:training()
+	 network_val:training()
+      end
+
+
+      local feval =function (x)
+	 collectgarbage()
+
+	 -- get new parameters
+	 if x ~= parameters then
+	    parameters:copy(x)
+	 end
+	 
+	 -- reset the gradients
+	 gradParameters:zero()
+
+	 -- forward the training data
+	 local outputs = network:forward(qrsData.train_x)
+	 local f = criterion:forward(outputs,qrsData.train_coord)
+	 local df = criterion:backward(outputs,qrsData.train_coord)
+	 network:backward(qrsData.train_x, df)
+	 
+	 -- update confusion matrix for training data
+	 -- for i =1 , dataNum_train do
+	 --    confusion:add(outputs[i],qrsData.train_y[i][1])
+	 -- end
+	 
+	 -- weight penlties
+	 if opt.weightDecay ~=0 and opt.optimization ~= 'SGD' then
+	    local norm = torch.norm
+	    f = f + opt.weightDecay* norm(parameters,2)^2/2
+
+	    -- update gradients
+	    gradParameters:add( parameters:clone():mul(opt.weightDecay))
+	 end
+
+	 return f, gradParameters
+	 
+      end
+
+
+      -- optimize on current mini-batch
+      if opt.optimization == 'ADAM' then
+
+	 -- Perform ADAM step:
+	 local adamConfig = adamConfig or {
+	    learningRate = opt.learningRate
+					  }
+	 local adamState = adamState or {}
+	 x,lossFun= optim.adam(feval, parameters, adamConfig,adamState)
+	 
+      elseif opt.optimization == 'LBFGS' then
+
+	 -- Perform LBFGS step:
+	 local lbfgsState = lbfgsState or {
+	    maxIter = opt.maxIter,
+	    learningRate = opt.learningRate
+					  }
+	 x,lossFun= optim.lbfgs(feval, parameters, lbfgsState)
+	 
+
+      elseif opt.optimization == 'SGD' then
+	 -- Perform SGD step:
+	 local sgdState = sgdState or {
+	    learningRate = opt.learningRate,
+	    momentum = opt.momentum,
+	    weightDecay = opt.weightDecay,
+	    learningRateDecay = 5e-7
+				      }
+	 x,lossFun = optim.sgd(feval, parameters, sgdState)
+      elseif opt.optimization == 'RMSprop' then
+	 local rmspropConfig = rmspropConfig or {
+	    learningRate = opt.learningRate,
+	    alpha = opt.RMSalpha
+						}
+	 x,lossFun = optim.rmsprop(feval, parameters, rmspropConfig)
+      else
+	 error('unknown optimization method')
+      end
+      
+      -- start evaluation
+      if opt.dropout then
+	 network:evaluate()
+	 network_val:evaluate()
+      end
+      --evaluate the trainined model on validation set
+      local outputs_train = network:forward(qrsData.train_x)
+      local f_train = criterion:forward(outputs_train,qrsData.train_coord)
+      local mser_train = MSERloss(outputs_train,qrsData.train_coord)
+      --evaluate the trainined model on validation set
+      local outputs_val = network_val:forward(qrsData.val_x)
+      local f_val = criterion:forward(outputs_val,qrsData.val_coord)
+      local mser_val = MSERloss(outputs_val,qrsData.val_coord)
+
+
+      if epoch > 1 then
+	 lossFunTrack = torch.cat(lossFunTrack, torch.Tensor(1,1):fill(torch.sqrt(f_train)),1)
+	 lossFunTrack_val = torch.cat(lossFunTrack_val, torch.Tensor(1,1):fill(torch.sqrt(f_val)),1)
+	 mserFunTrack_train = torch.cat(mserFunTrack_train, torch.Tensor(1,1):fill(mser_train),1)
+	 mserFunTrack_val = torch.cat(mserFunTrack_val, torch.Tensor(1,1):fill(mser_val),1)
+      else
+	 lossFunTrack = torch.Tensor(1,1):fill(torch.sqrt(f_train))
+	 lossFunTrack_val = torch.Tensor(1,1):fill(torch.sqrt(f_val))
+	 mserFunTrack_train = torch.Tensor(1,1):fill(mser_train)
+	 mserFunTrack_val =  torch.Tensor(1,1):fill(mser_val)
+      end
+
+      print("\nEpoch: " .. epoch .. " loss function: " .. f_train .. " time: " .. sys.clock() - time)
+   end
+
+   print('\n')
+   -- start evaluation
+   if opt.dropout then
+      network:evaluate()
+      network_val:evaluate()
+   end
+
+
+   bestRecord,bestIndice = torch.min(mserFunTrack_val,1)
+   losses = {
+      lossTrain = lossFunTrack,
+      lossVal = lossFunTrack_val,
+      mserTrain = mserFunTrack_train,
+      mserVal = mserFunTrack_val,
+      valStat = {mser_val_mean, mser_val_std, mser_val_ci95},
+      bestVal = bestRecord,
+      bestValIndice = bestIndice
+   }
+
+   --   print('The smalles validation distance error is '..tostring(bestRecord)..' at '..tostring(bestIndice))
+   torch.save(hexperName..'/training.t7',losses)
+   if opt.dropout then
+      network_test:evaluate()
+   end
+
+   local outputs_train = network:forward(qrsData.train_x)
+   local f_train = criterion:forward(outputs_train,qrsData.train_coord)
+   if not opt.project then
+       mser_train_mean,mser_rain_std,mser_train_ci95 = MSERloss(outputs_train,qrsData.train_coord)
+   else
+       mser_train_mean,mser_rain_std,mser_train_ci95 = MSERloss(criterion:project(outputs_train),qrsData.train_coord)
+   end
+
+   local outputs_val = network_val:forward(qrsData.val_x)
+   local f_val = criterion:forward(outputs_val,qrsData.val_coord)
+   if not opt.project then
+      mser_val_mean,mser_val_std,mser_val_ci95 = MSERloss(outputs_val,qrsData.val_coord)
+   else
+       mser_val_mean,mser_val_std,mser_val_ci95 = MSERloss(criterion:project(outputs_val),qrsData.val_coord)
+   end
+
+   local outputs_test = network_test:forward(qrsData.test_x)
+   local f_test = criterion:forward(outputs_test,qrsData.test_coord)
+   if not opt.project then
+       mser_test_mean,mser_test_std,mser_test_ci95,mser_test_xyz = MSERloss(outputs_test,qrsData.test_coord)
+   else
+       mser_test_mean,mser_test_std,mser_test_ci95,mser_test_xyz = MSERloss(criterion:project(outputs_test),qrsData.test_coord)
+   end
+   -- print('The stat on train dataset is mean error: '..tostring(mser_train_mean)..', the std: '..tostring(mser_train_std)..', the 95% confidence interval: '..tostring(mser_train_ci95))
+   -- print('The stat on val dataset is mean error: '..tostring(mser_val_mean)..', the std: '..tostring(mser_val_std)..', the 95% confidence interval: '..tostring(mser_val_ci95))
+   -- print('The stat on test dataset is mean error: '..tostring(mser_test_mean)..', the std: '..tostring(mser_test_std)..', the 95% confidence interval: '..tostring(mser_test_ci95))
+   -- print('The stat on each axis, x: '..tostring(mser_test_xyz.x)..', y: '..tostring(mser_test_xyz.y)..', z: '..tostring(mser_test_xyz.z))
+   stat = {
+      mean_train = mser_train_mean,
+      std_train = mser_train_std,
+      ci95_train = mser_train_ci95,
+      mean_val = mser_val_mean,
+      std_val =mser_val_std,
+      ci95_val = mser_val_ci95,
+      mean_test = mser_test_mean,
+      std_test = mser_test_std,
+      ci95_test = mser_test_ci95
+   }
+   torch.save(hexperName..'/stat.t7',stat)
+end
+--print(outputs_test[1598])
+
+-- gnuplot.figure(1)
+-- gnuplot.title('Regression loss function minimization over epochs')
+-- gnuplot.plot({'Training',lossFunTrack,'-'}, {'Validation',lossFunTrack_val,'-'})   
+-- gnuplot.xlabel('epochs')
+-- gnuplot.ylabel('L(x)')
+
+-- gnuplot.figure(2)
+-- gnuplot.title('Geodestic distance minimization over epochs')
+-- gnuplot.plot({'Training',mserFunTrack_train,'-'}, {'Validation',mserFunTrack_val,'-'})   
+-- gnuplot.xlabel('epochs')
+-- gnuplot.ylabel('L(x)')

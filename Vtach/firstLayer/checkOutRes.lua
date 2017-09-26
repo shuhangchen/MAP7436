@@ -1,0 +1,100 @@
+
+-- this file opens the saved opts and lossFun/accuracy track,
+-- show the parameters, and plot the track data
+
+require 'torch'
+require 'nn'
+require 'xlua'
+require 'optim'
+require 'gnuplot'
+require 'cunn'
+
+
+os.execute('killall gnuplot')
+--i,j,k,nt,nc = 2,2,1,1,2
+--hyperExperName = '/home/mark/Documents/VT_learning/Logs/logMES/hexLog_i'.. tostring(i)..'j'..tostring(j)..'k'..tostring(k)..'nt'..tostring(nt)..'nc'..tostring(nc)
+-- 2 3 1 4
+j,k,nt,nc=2,3,1,4
+
+hyperExperName = '/home/mark/Documents/VT_learning/Logs/logPAsquare/MES_'..'j'..tostring(j)..'k'..tostring(k)..'nt'..tostring(nt)..'nc'..tostring(nc)
+
+isFACTOR=true
+--hyperExperName = '/media/usb/log/MES/MES_'..'j'..tostring(j)..'k'..tostring(k)..'nt'..tostring(nt)..'nc'..tostring(nc)
+optFactor = torch.load(hyperExperName.."/hypers.t7")
+
+print("optFactor is: ")
+print(optFactor)
+
+
+-- compute the statistics for evaluating margin parameters
+if isFACTOR then
+      qrsData = torch.load('/home/mark/Documents/VT_learning/data/qrsData.t7')
+--   qrsData = torch.load('/home/mark/Documents/VT_learning/data/qrsDataNormalized.t7')
+   factor = torch.load(hyperExperName.. '/factor.net')
+   qrsData.train_x = qrsData.train_x:cuda()
+   flowNet = factor:get(1):get(1):get(1)
+   train_nodes = flowNet:forward(qrsData.train_x)
+   numSamplesForMargin = 4000
+   margin_index= torch.randperm(train_nodes[1]:size(1))[{{1,2*numSamplesForMargin}}]
+   margin_vt_pair1 = torch.Tensor(numSamplesForMargin, train_nodes[1]:size(2)):cuda()
+   margin_vt_pair2 = torch.Tensor(numSamplesForMargin, train_nodes[1]:size(2)):cuda()
+   margin_pa_pair1 = torch.Tensor(numSamplesForMargin, train_nodes[2]:size(2)):cuda()
+   margin_pa_pair2 = torch.Tensor(numSamplesForMargin, train_nodes[2]:size(2)):cuda()
+
+   for i=1,numSamplesForMargin do
+      margin_vt_pair1[i] = train_nodes[1][margin_index[i]]
+      margin_vt_pair2[i] = train_nodes[1][margin_index[i+numSamplesForMargin]]
+      margin_pa_pair1[i] = train_nodes[2][margin_index[i]]
+      margin_pa_pair2[i] = train_nodes[2][margin_index[i+numSamplesForMargin]]
+   end
+   vt_distance = torch.sqrt(torch.norm(margin_vt_pair1 - margin_vt_pair2,2)^2/numSamplesForMargin)
+   pa_distance = torch.sqrt(torch.norm(margin_pa_pair1 - margin_pa_pair2,2)^2/numSamplesForMargin)
+
+   print("Average VT distance is "..tostring(vt_distance))
+   print("Average PA distance is "..tostring(pa_distance))
+   lossFactor = torch.load(hyperExperName.."/factor_lossFun.t7")
+else
+   qrsData = torch.load('/home/mark/Documents/VT_learning/data/qrsDataNormalized.t7')
+   DAE=torch.load(hyperExperName..'/DAE.net')
+   qrsData.train_x = qrsData.train_x:cuda()
+   flowNet = nn.Sequential()
+   flowNet:add(DAE:get(1))
+   flowNet:add(DAE:get(2))
+   train_nodes = flowNet:forward(qrsData.train_x)
+   numSamplesForMargin = 4000
+   margin_index= torch.randperm(train_nodes:size(1))[{{1,2*numSamplesForMargin}}]
+   margin_pair1 = torch.Tensor(numSamplesForMargin, train_nodes:size(2)):cuda()
+   margin_pair2 = torch.Tensor(numSamplesForMargin, train_nodes:size(2)):cuda()
+   for i=1,numSamplesForMargin do
+      margin_pair1[i] = train_nodes[margin_index[i]]
+      margin_pair2[i] = train_nodes[margin_index[i+numSamplesForMargin]]
+   end
+
+   distance = torch.sqrt(torch.norm(margin_pair1 - margin_pair2,2)^2/numSamplesForMargin)
+   print('vt distance is '..tostring(distance/3*2))
+   print('pa distance is '..tostring(distance/3))
+   lossFactor = torch.load(hyperExperName.."/DAE_lossFun.t7")
+end
+--plot the learning curve
+-- load the intermediate results first
+
+finalLoss = torch.min(lossFactor)
+print("Final loss is "..tostring(finalLoss))
+lossEval = torch.load(hyperExperName.."/classifyTrack.t7")
+print('The best loss is '..tostring(torch.min(lossEval.lossVal)))
+print('The best loss is '..tostring(torch.min(lossEval.mserVal)))
+--plot them
+gnuplot.figure(1)
+gnuplot.title('Factor Loss function minimization over epochs')
+gnuplot.plot(lossFactor)   
+gnuplot.xlabel('epochs')
+gnuplot.ylabel('L(x)')
+
+-- plot the accuracy function track
+gnuplot.figure(2)
+gnuplot.title('Classification loss function minimization over epochs')
+gnuplot.plot({'Training',lossEval.lossTrain,'-'}, {'Validation',lossEval.lossVal,'-'})   
+gnuplot.xlabel('epochs')
+gnuplot.ylabel('L(x)')
+
+

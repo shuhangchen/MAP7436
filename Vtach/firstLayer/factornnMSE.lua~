@@ -1,0 +1,360 @@
+
+require 'torch'
+require 'nn'
+require 'xlua'
+require 'optim'
+require 'gnuplot'
+require 'cunn'
+
+factornnMSE ={}
+-- setup tuning parameters
+
+function factornnMSE.train(opt,j,k,nt,nc)
+   
+   -- opt = {
+   --    learningRate = 0.001,
+   --    weightDecay = 0.0001,
+   --    momentum = 0.9,
+   --    sampleEachEpoch = 20000,
+   --    marginVT = 0.95,
+   --    marginPA = 0.7,
+   --    hingeCoef = 0.01,
+   --    GaussianCorruptionVar = 0.15,
+   --    maskCorruptionVar = 0,         --0.3
+   --    maxNumEpoches = 500,
+   --    batchSize = 100,
+   --    numHiddenUnits = 1200,
+   --    numHiddenUnits_VT = 800,
+   --    optimMethod = 'SGD',
+   --    cuda ==1
+   -- }
+   -- close all gnuplots
+   os.execute('killall gnuplot')
+
+
+   -- enter the default director to save results
+   hexperName = '/home/mark/VT_learning/Logs/logPAsquare/MES_j'..tostring(j)..'k'..tostring(k)..'nt'..tostring(nt)..'nc'..tostring(nc)
+--   hexperName = '/media/usb/log/MES/MES_'..'j'..tostring(j)..'k'..tostring(k)..'nt'..tostring(nt)..'nc'..tostring(nc)
+   os.execute('mkdir -p '.. hexperName)
+   torch.save(hexperName..'/hypers.t7',opt)
+   -- you can only choose one type of noise 
+   assert( ((opt.GaussianCorruptionVar and opt.maskCorruptionVar)  and (opt.GaussianCorruptionVar or opt.maskCorruptionVar)), " the denoising parameter is not set propoerly")
+
+
+
+ 
+   -- load the QRS data
+   qrsData = torch.load('/home/mark/VT_learning/data/qrsData.t7')
+
+   -- load the QRS pair data
+   qrsPairs = torch.load('/home/mark/VT_learning/data/qrsPairs_coord.t7')
+   if opt.cuda then
+      qrsData.train_x = qrsData.train_x:cuda()
+      qrsPairs = qrsPairs:cuda()       -- -- TODO: he file format is (each row) [index_example1 index_example2 labelVT(-1 or 1), label patient(-1 or 1)]
+   end
+
+   dataNum = qrsData.train_x:size(1)
+   dataDim = qrsData.train_x:size(2)
+   pairNum = qrsPairs:size(1)
+
+   -- setup hidden unit architecture
+   numHiddenUnits = opt.numHiddenUnits
+   numHiddenUnits_VT = opt.numHiddenUnits_VT
+   numHiddenUnits_PA =  opt.numHiddenUnits - opt.numHiddenUnits_VT
+
+
+
+   assert((numHiddenUnits_PA > 0), " The division of PA and VT nodes is wrong")
+
+   batchSize = opt.batchSize
+   opt.sampleEachEpoch = opt.sampleEachEpoch - opt.sampleEachEpoch% batchSize  -- throw the lag data alway
+
+
+   -- construct the netwrok architecture  1200-2400-1200
+   -- encoder part
+   encoder_example1 = nn.ConcatTable()
+   ennn_p1_VT = nn.Sequential()
+   ennn_p1_VT:add(nn.Linear(dataDim,numHiddenUnits_VT))
+   ennn_p1_VT:add(nn.Sigmoid())
+   encoder_example1:add(ennn_p1_VT)
+   ennn_p1_PA = nn.Sequential()
+   ennn_p1_PA:add(nn.Linear(dataDim,numHiddenUnits_PA))
+   ennn_p1_PA:add(nn.Sigmoid())
+   encoder_example1:add(ennn_p1_PA)
+
+   encoder_example2 = nn.ConcatTable()
+   ennn_p2_VT = nn.Sequential()
+   ennn_p2_VT:add(nn.Linear(dataDim,numHiddenUnits_VT))
+   ennn_p2_VT:add(nn.Sigmoid())
+   encoder_example2:add(ennn_p2_VT)
+   ennn_p2_PA = nn.Sequential()
+   ennn_p2_PA:add(nn.Linear(dataDim,numHiddenUnits_PA))
+   ennn_p2_PA:add(nn.Sigmoid())
+   encoder_example2:add(ennn_p2_PA)
+   -- two example tables should share weights and bias
+   encoder_example2:get(1):get(1).weight:set(encoder_example1:get(1):get(1).weight)
+   encoder_example2:get(1):get(1).bias:set(encoder_example1:get(1):get(1).bias)
+   encoder_example2:get(2):get(1).weight:set(encoder_example1:get(2):get(1).weight)
+   encoder_example2:get(2):get(1).bias:set(encoder_example1:get(2):get(1).bias)
+
+   -- !!! pay attenion here, I am using optim package (flattened paramters), so I have to share gradients here, But I would need to do this if I use the updateGradParameters in my training procedure
+   encoder_example2:get(1):get(1).gradWeight:set(encoder_example1:get(1):get(1).gradWeight)
+   encoder_example2:get(1):get(1).gradBias:set(encoder_example1:get(1):get(1).gradBias)
+   encoder_example2:get(2):get(1).gradWeight:set(encoder_example1:get(2):get(1).gradWeight)
+   encoder_example2:get(2):get(1).gradBias:set(encoder_example1:get(2):get(1).gradBias)
+
+   encoder_eg1andeg2 = nn.ParallelTable()
+   encoder_eg1andeg2:add(encoder_example1)
+   encoder_eg1andeg2:add(encoder_example2)
+
+   encoder = nn.Sequential()
+   encoder:add(encoder_eg1andeg2)
+
+
+   -- decoder network
+   decoder_example1 = nn.Sequential()
+   decoder_example1:add(nn.JoinTable(2))
+   decoder_example1:add(nn.Linear(numHiddenUnits,dataDim))
+--   decoder_example1:add(nn.Sigmoid())  MSE criterion corresponds to linear units
+
+   decoder_example2 = nn.Sequential()
+   decoder_example2:add(nn.JoinTable(2))
+   decoder_example2:add(nn.Linear(numHiddenUnits,dataDim))
+--   decoder_example2:add(nn.Sigmoid()) MSE criterion corresponds to linear units
+
+   -- make sure that the decoder example networks share weights
+   decoder_example2:get(2).weight:set(decoder_example1:get(2).weight)
+   decoder_example2:get(2).bias:set(decoder_example1:get(2).bias)
+   -- !!! pay attenion here, I am using optim package (flattened paramters), so I have to share gradients here, But I would need to do this if I use the updateGradParameters in my training procedure
+   decoder_example2:get(2).gradWeight:set(decoder_example1:get(2).gradWeight)
+   decoder_example2:get(2).gradBias:set(decoder_example1:get(2).gradBias)
+
+   decoder = nn.ParallelTable()
+   decoder:add(decoder_example1)
+   decoder:add(decoder_example2)
+
+   -- concatenate the encoder and decoder into the factor model
+   factor = nn.Sequential()
+   factor:add(encoder)
+   factor:add(decoder)
+
+
+   -- define the loss function for the denoising reconstruction part
+   e1_criterion =nn.MSECriterion()  --nn.MSECriterion()   -- MESCriterion for the first layer, BCECriterion for the following layer
+   e2_criterion =nn.MSECriterion()  -- nn.MSECriterion()   -- -- MESCriterion for the first layer, BCECriterion for the following layer
+   denoising_criterion = nn.ParallelCriterion():add(e1_criterion,0.5):add(e2_criterion,0.5)
+   if opt.cuda then
+      factor:cuda()
+      denoising_criterion:cuda()
+   end
+   -- command line prompt
+--   print('Training two-way factored denoising autoencoder\n'.. factor:__tostring());
+
+
+   -- retrieve parameters and gradients (flattened)
+   parameters, gradients = factor:getParameters()
+
+   --pulls out the memory location staff out of the for loop for computing efficiency
+   local batchx_eg1 = torch.Tensor(batchSize,dataDim)
+   local batchy_eg1 = torch.Tensor(batchSize,dataDim)
+   local batchx_eg2 = torch.Tensor(batchSize,dataDim)
+   local batchy_eg2 = torch.Tensor(batchSize,dataDim)
+   local VTPAlabels = torch.Tensor(batchSize,2)
+   -- mallocate memory here
+   local mlp_VT = nn.PairwiseDistance(2)
+   local mlp_PA = nn.PairwiseDistance(2)
+   -- transform into cuda() version
+   local hingeVT = nn.HingeEmbeddingCriterion(opt.marginVT)
+   -- transform into cuda() version
+   if opt.cuda then
+      mlp_VT:cuda()
+      mlp_PA:cuda()
+      hingeVT:cuda()
+      batchx_eg1 = batchx_eg1:cuda()
+      batchy_eg1 = batchy_eg1:cuda()
+      batchx_eg2 = batchx_eg2:cuda()
+      batchy_eg2 = batchy_eg2:cuda()
+      VTPAlabels = VTPAlabels:cuda()
+   end
+   if (opt.optimMethod == 'SGD') then   -- don't repeat weight decay for SGD method
+      opt.coefL2 = 0
+   end
+   gradHinge = {{},{}}
+
+
+
+   -- start training
+   epoch=0
+
+   while epoch < opt.maxNumEpoch do
+      xlua.progress(epoch, opt.maxNumEpoch)
+      epoch = epoch +1
+
+      local lossFun = 0
+
+      local time = sys.clock();
+      local shuffle = torch.randperm(pairNum)[{{1,opt.sampleEachEpoch}}]
+      
+      -- training one epoch
+      for i= 1 ,opt.sampleEachEpoch , batchSize do
+	 -- display progress
+--	 xlua.progress(i+batchSize-1,dataNum)
+	
+
+	 local k=1;
+	 
+	 for j = i, i+batchSize-1 do
+	    batchy_eg1[k] = qrsData.train_x[qrsPairs[shuffle[j]][1]]:clone()
+	    batchy_eg2[k] = qrsData.train_x[qrsPairs[shuffle[j]][2]]:clone()
+	    VTPAlabels[k] = qrsPairs[{{shuffle[j]},{3,4}}]:clone()
+	    k = k +1
+	 end
+	 -- add noise to corrupt the input
+	 if (opt.GaussianCorruptionVar) then
+	    -- Gaussian additive noise
+	    if opt.cuda  then
+
+	       batchx_eg1 = batchy_eg1 +  torch.randn(batchSize,dataDim):cuda():mul(opt.GaussianCorruptionVar)
+	       batchx_eg2 = batchy_eg2 +  torch.randn(batchSize,dataDim):cuda():mul(opt.GaussianCorruptionVar)
+	    else
+	       batchx_eg1 = batchy_eg1 +  torch.randn(batchSize,dataDim):mul(opt.GaussianCorruptionVar)
+	       batchx_eg2 = batchy_eg2 +  torch.randn(batchSize,dataDim):mul(opt.GaussianCorruptionVar)
+	    end
+	 else
+	    -- masking noise
+	    if opt.cuda then
+	       batchx_eg1 = torch.cmul(batchy_eg1,torch.ge(torch.rand(batchSize,dataDim),opt.maskCorruption):double():cuda())
+	       batchx_eg2 = torch.cmul(batchy_eg2,torch.ge(torch.rand(batchSize,dataDim),opt.maskCorruption):double():cuda())
+	    else
+	       batchx_eg1 = torch.cmul(batchy_eg1,torch.ge(torch.rand(batchSize,dataDim),opt.maskCorruption):double())
+	       batchx_eg2 = torch.cmul(batchy_eg2,torch.ge(torch.rand(batchSize,dataDim),opt.maskCorruption):double())  
+	    end
+	 end
+	
+	 local feval = function(x)
+	    
+	    collectgarbage()
+
+	    if x ~= parameters then
+	       parameters:copy(x)
+	    end
+	    
+	    -- reset parameters
+	    factor:zeroGradParameters()
+	    -- backpropogate gradients for whole factor
+	    local pred = factor:forward({batchx_eg1, batchx_eg2})
+	    local errRecons = denoising_criterion:forward(pred,{batchy_eg1,batchy_eg2})
+	    local dw = denoising_criterion:backward(pred, {batchy_eg1,batchy_eg2})
+	    factor:backward({batchx_eg1, batchx_eg2}, dw)
+	    
+
+	    local function VTPACriterion(input, VTPAlabels)
+	       -- 0.5* (pairDistance_VT + pairDistance_PA)
+	       -- define the mlp_vt and pa model out side the loop, only embeding for VT nodes, and square function for the patient nodes
+	       local distanceVT = mlp_VT:forward({input[1][1], input[2][1]})
+	       local distancePA = mlp_PA:forward({input[1][2], input[2][2]})
+	       errSqurePA = torch.cmul(distancePA, (torch.add(VTPAlabels[{{},{2}}],1):mul(0.5)))
+
+	       local errHingeVT = hingeVT:forward(distanceVT, VTPAlabels[{{},{1}}])
+	       
+	       -- multiple the coefficient to loss function
+	       errHinge = 0.5*opt.hingeCoef*(errHingeVT + errSqurePA:mean())
+	       -- backpropagate
+	       local gradHingeVT = hingeVT:backward(distanceVT, VTPAlabels[{{},{1}}])
+	       mlp_VT:zeroGradParameters()
+	       local gradOutputVT = mlp_VT:backward({input[1][1], input[2][1]}, gradHingeVT)
+	       -- backpropagate
+	       local gradSquarePA = torch.Tensor(distancePA:size()):fill(1/opt.batchSize)
+	       if opt.cuda then
+		  gradSquarePA = gradSquarePA:cuda()
+	       end
+	       mlp_PA:zeroGradParameters()
+	       local gradOutputPA = mlp_PA:backward({input[1][2], input[2][2]}, gradSquarePA)
+	       
+	       -- multiply the coefficient into gradient vector
+	       gradHinge[1][1] =  torch.mul(gradOutputVT[1], 0.5*opt.hingeCoef)
+	       gradHinge[2][1] =  torch.mul(gradOutputVT[2], 0.5*opt.hingeCoef)
+	       gradHinge[1][2] =  torch.mul(gradOutputPA[1], 0.5*opt.hingeCoef)
+	       gradHinge[2][2] =  torch.mul(gradOutputPA[2], 0.5*opt.hingeCoef)
+	       return errHinge, gradHinge
+	    end
+	    -- backpropagate gradients for encoder of pairwise distance
+	    lossHinge, gradHinge = VTPACriterion(factor:get(1).output,VTPAlabels)
+	    encoder:backward({batchx_eg1,batchx_eg2},gradHinge)
+	    
+	    local err = errRecons + lossHinge
+	    --add penalty function for weight matrix
+	    if opt.coefL1 ~= 0 or opt.coefL2 ~= 0 then
+	       
+	       local norm, sign = torch.norm,torch.sign
+	       
+	       err = err + opt.coefL1* norm(parameters,1)
+	       err = err + opt.coefL2* norm(parameters,2)^2/2
+	       -- update gradients accordingly
+	       gradients:add( sign(parameters):mul(opt.coefL1) + parameters:clone():mul(opt.coefL2) )
+	       
+	    end
+	    return err, gradients
+	 end
+	 
+	 -- optimize on current mini-batch
+	 if opt. optimMethod == 'ADAM' then
+
+	    -- Perform ADAM step:
+	    local adamConfig = adamConfig or {
+		  learningRate = opt.learningRate
+	       }
+	    local adamState = adamState or {}
+	    x,batchlossFun= optim.adam(feval, parameters, adamConfig,adamState)
+	    
+
+	 elseif opt. optimMethod == 'SGD' then
+	    -- Perform SGD step:
+	    local sgdState = sgdState or {
+	       learningRate = opt.learningRate,
+	       momentum = opt.momentum,
+	       weightDecay = opt.weightDecay,
+	       learningRateDecay = 5e-7
+				   }
+	    x,batchlossFun = optim.sgd(feval, parameters, sgdState)
+	 elseif opt. optimMethod == 'RMSprop' then
+	    local rmspropConfig = rmspropConfig or {
+	       learningRate = opt.learningRate,
+	       alpha = opt.RMSalpha
+					     }
+	    local rmsState = rmsState or {}
+	    x, batchlossFun = optim.rmsprop(feval, parameters, rmspropConfig)
+	 else
+	    error('unknown optimization method')
+	 end
+	 
+	 lossFun = lossFun + batchlossFun[1]
+      end
+      print("\nEpoch: " .. epoch .. " loss function: " .. lossFun/opt.sampleEachEpoch .. " time: " .. sys.clock() - time)
+
+      if epoch >1 then
+	 lossFunTrack = torch.cat(lossFunTrack, torch.Tensor(1,1):fill(lossFun/opt.sampleEachEpoch*batchSize),1)
+      else
+	 lossFunTrack = torch.Tensor(1,1):fill(lossFun/opt.sampleEachEpoch*batchSize)
+      end
+      
+
+   end
+
+   -- save the model
+   -- print('Saving the model and loss function track to files')
+   torch.save(hexperName..'/factor.net', factor)
+   torch.save(hexperName..'/factor_lossFun.t7', lossFunTrack)
+
+   -- plot the loss function track
+   -- gnuplot.epsfigure(hexperName.. '/lossFactor.eps')
+   -- gnuplot.title('Loss function minimization over epochs')
+   -- gnuplot.plot(lossFunTrack)   
+   -- gnuplot.xlabel('epochs')
+   -- gnuplot.ylabel('L(x)')
+   -- -- close the gnuplot files
+   -- gnuplot.plotflush()
+   -- step out the current directory
+   
+   
+end
